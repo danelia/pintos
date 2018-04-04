@@ -30,11 +30,16 @@ static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
 
+struct list sleep_list;
+struct lock sleep_list_lock;
+
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
 void
 timer_init (void)
 {
+  list_init(&sleep_list);
+  lock_init(&sleep_list_lock);
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
 }
@@ -84,16 +89,40 @@ timer_elapsed (int64_t then)
   return timer_ticks () - then;
 }
 
+/* Compare function for sleeping thread list */
+static bool
+cmp_fnc(const struct list_elem *a, const struct list_elem *b, void * aux UNUSED)
+{
+  struct sleep_list_elem* first = list_entry(a, struct sleep_list_elem, list_el);
+  struct sleep_list_elem* second = list_entry(b, struct sleep_list_elem, list_el);
+  return first->tick < second->tick;
+}
+
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
 void
 timer_sleep (int64_t ticks)
 {
+  if(ticks <= 0) return;
   int64_t start = timer_ticks ();
 
   ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks)
-    thread_yield ();
+
+  struct thread* curr = thread_current();
+  struct semaphore sem;
+  sema_init(&sem, 0);
+  
+  struct sleep_list_elem curr_elem;
+  curr_elem.sem = &sem;
+  curr_elem.curr_thread = curr;
+  curr_elem.tick = ticks + start;
+
+  lock_acquire(&sleep_list_lock);
+  list_insert_ordered(&sleep_list, &curr_elem.list_el, &cmp_fnc, NULL);
+  lock_release(&sleep_list_lock);
+  
+  sema_down(&sem);
+
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -171,6 +200,18 @@ static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
+
+  while(!list_empty(&sleep_list)){
+    struct sleep_list_elem* curr = list_entry(list_begin(&sleep_list), struct sleep_list_elem, list_el);
+
+    if(ticks >= curr->tick){
+      sema_up(curr->sem);
+      list_pop_front(&sleep_list);
+      continue;
+    }
+    break;
+  }
+  
   thread_tick ();
 }
 
