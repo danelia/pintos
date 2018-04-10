@@ -106,6 +106,9 @@ struct thread
     struct list lock_list;             /* locks that current thread has acquired */
     struct lock *thread_lock;          /* pointer on lock that thread could be locked on */
     int donation_priority;             /* priority other thread has donated */
+
+    fixed_point_t nice;                /* thread nice value */
+    fixed_point_t recent_cpu;          /* thread recent_cpu value */
   };
 
 /* If false (default), use round-robin scheduler.
