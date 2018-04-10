@@ -52,6 +52,7 @@ We decided to insert elements in list in sorted manner, because removing first e
 ### Data Structures
 
 ###### In thread.h
+
 ```C
 struct thread
   {
@@ -63,6 +64,7 @@ struct thread
   }
 ```
 ###### In synch.h
+
 ```C
 struct lock
   {
@@ -74,6 +76,7 @@ struct lock
 ```
 
 ###### In synch.c
+
 ```C
 /* reccursive helper method to donate priority */
 static void
@@ -124,3 +127,53 @@ Traversing lists and other such structures that many threads can access at the s
 One trade off we have from our previous code, is that with ready queue insertion into the ready list happened ordered so when taking the next thread our all we had to do was pop the front of the list to get the maximum priority thread. Removing was done in `O(1)` time. Now removing is done in `O(n)`. However, inserting into the list is done in `O(1)`.
 
 Because We’ve added several variables to already established structures such as adding priority to the lock structure we gain quick access to information that would otherwise require us to go over many structures if implemented differently.
+
+## Task 3: Multi-level Feedback Queue Scheduler (MLFQS)
+
+### Data Structures
+
+###### In thread.h
+
+```C
+struct thread{
+
+    ...
+    fixed_point_t nice;                /* thread nice value */
+    fixed_point_t recent_cpu;          /* thread recent_cpu value */
+  };
+```
+
+###### In thread.c
+
+```C
+struct list mlfqs_list[PRI_MAX + 1];    // mlfqs list array
+fixed_point_t load_avg;                 // load avg value
+int ready_threads;                      // amount of ready_threads
+
+/* shortcut to put thread in mlfqs list array */
+#define put_in_mlfqs(T) list_push_back(&mlfqs_list[T->priority], &T->elem)
+```
+
+### Algorithm
+
+#### Inserting into Multi-level Feedback Queue
+
+After calculating thread's priority, we insert it into the list with matching index number to it (priority). Our mlfq has 64 indices, therefore they completely match any value of thread priority.
+
+#### Scheduling
+
+In order to choose next thread to run, we have to choose one from a non-empty list at the highest index of the array. We use `list_pop_front()` to take thread out of the list. If no such non-empty list exists we schedule idle thread.
+
+#### Calculating thread and system variables
+
+In `thread_tick()` for particular time frames, we update thread priorities, recent cpus and load avarege accordingly: at every tick we increment running thread's recent cpu by one, at every forth tick we recalculate running thread priority and at every second we recalculate load avarege and recent cpus for all ready threads.
+
+### Synchronization
+
+Because most of our code is run either during interupt or within functions where interupts are disabled, there is not much need for synchronization.
+
+### Rationale
+
+Inserting into the mlfq takes `O(1)` time, because we are using `list_push_back()` since all threads in that particular list have same priority. Taking the thread out of the list requires traversal of the array and since size of array is fixed and we use `list_pop_back()` the overall time is `O(1)`.
+
+We alse made slight modifications to the algorithm described in the assigment description. Instead of updating every threads priority every 4th tick, we only update that of currently running, since only it's recent cpu has updated in the last 4 ticks.
