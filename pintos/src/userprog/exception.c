@@ -4,6 +4,15 @@
 #include "userprog/gdt.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "userprog/pagedir.h"
+#include "threads/vaddr.h"
+#include <string.h>
+#ifdef VM
+  #include <debug.h>
+  #include "vm/frame.h"
+  #include "vm/page.h"
+  #include "syscall.h"
+#endif
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -81,6 +90,7 @@ kill (struct intr_frame *f)
 
   /* The interrupt frame's code segment value tells us where the
      exception originated. */
+
   switch (f->cs)
     {
     case SEL_UCSEG:
@@ -94,7 +104,7 @@ kill (struct intr_frame *f)
     case SEL_KCSEG:
       /* Kernel's code segment, which indicates a kernel bug.
          Kernel code shouldn't throw exceptions.  (Page faults
-         may cause kernel exceptions--but they shouldn't arrive
+         may cause kernel exceptions--but they shouldn't arrive 
          here.)  Panic the kernel to make the point.  */
       intr_dump_frame (f);
       PANIC ("Kernel bug - unexpected interrupt in kernel");
@@ -148,14 +158,63 @@ page_fault (struct intr_frame *f)
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
+#ifdef VM
+  if(not_present && is_user_vaddr(fault_addr))
+  {
+
+    uint8_t * rounded = pg_round_down(fault_addr);
+    struct supp_page_entry stub;
+    stub.upage = rounded;
+
+    struct hash_elem* e = hash_find(&thread_current()->supp_page_table, &stub.elem);
+    if(e == NULL){
+      if(fault_addr >= f->esp - 32 && stack_grow(fault_addr))
+          return ;
+
+      goto fail;
+    }
+
+    struct supp_page_entry* p = hash_entry(e,struct supp_page_entry, elem);
+
+    enum palloc_flags flags= PAL_USER;
+    if (p->zero_bytes == PGSIZE)
+      flags |= PAL_ZERO;
+
+    void * kpage = alloc_frame(flags,p);
+    if(kpage == NULL)
+      goto fail;
+
+    lock_acquire (&synch);
+    if (file_read_at (p->file, kpage, p->read_bytes, p->offs) != (int) p->read_bytes)
+    {
+      free_frame(kpage);
+      lock_release(&synch);
+      goto fail;
+    }
+    
+    lock_release(&synch);
+    memset (kpage + p -> read_bytes, 0, p -> zero_bytes);
+
+    struct thread *t = thread_current();
+    if(!(pagedir_get_page (t->pagedir, p->upage) == NULL
+          && pagedir_set_page (t->pagedir, p->upage, kpage, p->writable)))
+    {
+      free_frame(kpage);
+      goto fail;
+    }
+
+    return;
+  }
+#endif
+  fail:
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
      which fault_addr refers. */
-  printf ("Page fault at %p: %s error %s page in %s context.\n",
+    printf ("Page fault at %p: %s error %s page in %s context.\n",
           fault_addr,
           not_present ? "not present" : "rights violation",
           write ? "writing" : "reading",
           user ? "user" : "kernel");
-  kill (f);
+    kill (f);
 }
 

@@ -3,6 +3,7 @@
 
 #include <debug.h>
 #include <list.h>
+#include <hash.h>
 #include <stdint.h>
 #include "threads/synch.h"
 #include "threads/fixed-point.h"
@@ -97,18 +98,50 @@ struct thread
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
+    struct list cp_list;                /* List containing child process id */
+    struct child_process * self;        /* Current process */
+    struct list file_list;              /* File_ list */
+    int fd_count;                       /* File descriptor count */
     uint32_t *pagedir;                  /* Page directory. */
+#endif
+
+#ifdef VM
+    struct hash supp_page_table;
+    struct list mmap_list;
+    int map_id_count;
 #endif
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
+  };
 
-    struct list lock_list;             /* locks that current thread has acquired */
-    struct lock *thread_lock;          /* pointer on lock that thread could be locked on */
-    int donation_priority;             /* priority other thread has donated */
+#ifdef VM
+struct mmap_
+  {
+      int map_id;
+      struct supp_page_entry * p;
 
-    fixed_point_t nice;                /* thread nice value */
-    fixed_point_t recent_cpu;          /* thread recent_cpu value */
+      struct list_elem elem;
+  };
+#endif
+
+struct child_process
+  {
+    tid_t cp_id;                        /* Child process id */
+    int status;                         /* Child process status */
+    bool created;                       /* Child loaded sucessful */
+    struct semaphore sema;              /* Semaphore for parent-child communication */
+    struct file *to_deny;                /* File to deny write*/
+
+    struct list_elem cp_list_elem;      /* List element for child process id list */
+  };
+
+struct file_
+  {
+    int fd;                           /* File descriptor */
+    struct file * file;               /* File */
+
+    struct list_elem _file_elem;      /* List elem */
   };
 
 /* If false (default), use round-robin scheduler.
@@ -146,8 +179,5 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
-
-bool thread_cmp_fnc(const struct list_elem *a, const struct list_elem *b, void * aux UNUSED);
-bool comp(struct thread* first, struct thread* second);
 
 #endif /* threads/thread.h */
