@@ -3,6 +3,8 @@ CS162 Group Repository
 
 This repository contains code for CS162 group projects.
 
+Code for Threads is on branch `master`, for user programs and virtual memory is on `userprog/vm` and for user programs and file systems on `userprog/fs`.
+
 **Design documents**
 
 * [Project 1: Threads](doc/project1.md)
