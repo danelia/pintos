@@ -6,9 +6,12 @@
 #include "filesys/free-map.h"
 #include "filesys/inode.h"
 #include "filesys/directory.h"
+#include "threads/thread.h"
 
 /* Partition that contains the file system. */
 struct block *fs_device;
+static bool find(const char *name, char name_[NAME_MAX + 1], struct dir **);
+static int get_next_part (char part[NAME_MAX + 1], const char **srcp);
 
 static void do_format (void);
 
@@ -28,6 +31,7 @@ filesys_init (bool format)
     do_format ();
 
   free_map_open ();
+  thread_current()->cwd = inode_open(ROOT_DIR_SECTOR);
 }
 
 /* Shuts down the file system module, writing any unwritten data
@@ -43,14 +47,16 @@ filesys_done (void)
    Fails if a file named NAME already exists,
    or if internal memory allocation fails. */
 bool
-filesys_create (const char *name, off_t initial_size)
+filesys_create (const char *name, off_t initial_size, bool isdir)
 {
   block_sector_t inode_sector = 0;
-  struct dir *dir = dir_open_root ();
-  bool success = (dir != NULL
+  struct dir *dir = NULL;
+  char name_[NAME_MAX + 1];
+
+  bool success = (find(name, name_, &dir)
                   && free_map_allocate (1, &inode_sector)
-                  && inode_create (inode_sector, initial_size)
-                  && dir_add (dir, name, inode_sector));
+                  && inode_create (inode_sector, initial_size, isdir)
+                  && dir_add (dir, name_, inode_sector));
   if (!success && inode_sector != 0)
     free_map_release (inode_sector, 1);
   dir_close (dir);
@@ -66,11 +72,12 @@ filesys_create (const char *name, off_t initial_size)
 struct file *
 filesys_open (const char *name)
 {
-  struct dir *dir = dir_open_root ();
+  struct dir *dir = NULL;
   struct inode *inode = NULL;
+  char name_[NAME_MAX + 1];
 
-  if (dir != NULL)
-    dir_lookup (dir, name, &inode);
+  if (find(name, name_, &dir))
+    dir_lookup (dir, name_, &inode);
   dir_close (dir);
 
   return file_open (inode);
@@ -83,8 +90,9 @@ filesys_open (const char *name)
 bool
 filesys_remove (const char *name)
 {
-  struct dir *dir = dir_open_root ();
-  bool success = dir != NULL && dir_remove (dir, name);
+  struct dir *dir = NULL;
+  char name_[NAME_MAX + 1];
+  bool success = find(name, name_, &dir) && dir_remove (dir, name_);
   dir_close (dir);
 
   return success;
@@ -100,4 +108,86 @@ do_format (void)
     PANIC ("root directory creation failed");
   free_map_close ();
   printf ("done.\n");
+}
+
+bool
+filesys_chdir (const char *name)
+{
+  struct thread *t = thread_current ();
+  struct dir *dir = NULL;
+  struct inode *inode = NULL;
+  char name_[NAME_MAX + 1];
+  bool a = find (name, name_, &dir), b = dir_lookup (dir, name_, &inode);//, c = !get_removed(inode);
+  if (a && b) {
+    dir_close (dir);
+    inode_close (t->cwd);
+    t->cwd = inode;
+    return true;
+  }
+
+  dir_close (dir);
+  return false;
+}
+
+static bool
+find (const char *name, char name_[NAME_MAX +1], struct dir **dir_)
+{
+  struct inode *inode;
+  struct inode *next;
+
+  /* Empty path name. */
+  if (name[0] == '\0')
+    return false;
+  
+  /* Absolute or relative path name. */
+  if (name[0] == '/')
+    inode = next = inode_open (ROOT_DIR_SECTOR);
+  else
+    inode = next = inode_reopen (thread_current ()->cwd);
+
+  while (get_next_part (name_, &name) == 1) {
+    struct dir *dir = dir_open (inode_reopen (inode));
+    dir_lookup (dir, name_, &next);
+    dir_close (dir);
+    if (next == NULL || !isdir (next))
+      break;
+    inode_close (inode);
+    inode = next;
+  }
+
+  /* PATH was not parsed completely. */
+  if (get_next_part (name_, &name) != 0)
+    return false;
+
+  /* If NEXT is a directory, set FILENAME to "." */
+  if (inode == next)
+    strlcpy (name_, ".", 2);
+    else
+    inode_close (next);
+
+  return (*dir_ = dir_open (inode)) != NULL;
+}
+
+static int
+get_next_part (char part[NAME_MAX + 1], const char **srcp)
+{
+  const char *src = *srcp;
+  char *dst = part;
+  /* Skip leading slashes. If it’s all slashes, we’re done. */
+  while (*src == '/')
+    src++;
+  if (*src == '\0')
+    return 0;
+  /* Copy up to NAME_MAX character from SRC to DST. Add null terminator. */
+  while (*src != '/' && *src != '\0') {
+    if (dst < part + NAME_MAX)
+      *dst++ = *src;
+    else
+      return -1;
+    src++;
+  }
+  *dst = '\0';
+  /* Advance source pointer. */
+  *srcp = src;
+  return 1;
 }

@@ -3,20 +3,9 @@
 
 #include <round.h>
 #include <stdint.h>
-#include "lib/kernel/list.h"
 
 /* Number of timer interrupts per second. */
 #define TIMER_FREQ 100
-
-struct sleep_list_elem
-{
-	struct list_elem list_el;  // For inserting into list
-
-	struct semaphore* sem;	// Semaphore for unblocking sleeping thread
-	struct thread* curr_thread; // Sleeping thread
-
-	int64_t tick; // Pre-determined time for wake up
-};
 
 void timer_init (void);
 void timer_calibrate (void);

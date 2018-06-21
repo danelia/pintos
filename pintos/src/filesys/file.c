@@ -166,3 +166,15 @@ file_tell (struct file *file)
   ASSERT (file != NULL);
   return file->pos;
 }
+
+bool
+file_isdir(struct file * file)
+{
+  return isdir(file->inode);
+}
+
+block_sector_t
+file_get_inumber(struct file * file)
+{
+  return get_inumber(file->inode);
+}

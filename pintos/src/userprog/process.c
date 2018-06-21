@@ -18,10 +18,40 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 
 static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+struct child_process * get_process(tid_t tid);
+void free_thread(struct child_process *t);
+void close_files_and_free_children(struct thread *t); /* Close all open files */
+
+/* Removes from list and clears child process from list thread */
+void
+free_thread(struct child_process *t)
+{
+  list_remove(&t->cp_list_elem);
+  free(t);
+}
+
+/* Traverses child process list to find desiered one */
+struct child_process *
+get_process(tid_t tid)
+{
+  struct list_elem *e;
+  struct thread * t = thread_current();
+
+  for (e = list_begin (&t->cp_list); e != list_end (&t->cp_list);
+       e = list_next (e))
+    {
+      struct child_process *cp = list_entry (e, struct child_process, cp_list_elem);
+      if(cp->cp_id == tid)
+        return cp;
+    }
+
+  return NULL;
+}
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -40,11 +70,25 @@ process_execute (const char *file_name)
   if (fn_copy == NULL)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
+  
+  int len = strcspn(file_name, " ");
+  char *fn = malloc(len + 1);
+  strlcpy(fn, file_name, len + 1);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (fn, PRI_DEFAULT, start_process, fn_copy);
+  free(fn);
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy);
+
+    struct child_process * curr = get_process(tid);
+    if(curr == NULL)
+      return -1;
+
+    sema_down(&curr->sema);
+    if(!curr->created)
+      return -1;
+
   return tid;
 }
 
@@ -54,20 +98,49 @@ static void
 start_process (void *file_name_)
 {
   char *file_name = file_name_;
+  int fn_size = strlen(file_name) + 1;
   struct intr_frame if_;
   bool success;
 
+    char *argv[64];
+    int argc = 0;
+    char * saveptr;
+    
+    char * token = strtok_r(file_name, " ", &saveptr);
+    while (token != NULL){
+      argv[argc++] = token + (int)(PHYS_BASE - fn_size - file_name_);
+      token = strtok_r(NULL, " ", &saveptr);
+    }
+    
+    argv[argc++] = (char *) 0;
+  
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp);
+  
+    struct thread *curr = thread_current();
+    curr->self->created = success;
+    sema_up(&curr->self->sema);
+
+    if (!success)
+      thread_exit ();
+
+    if_.esp -= fn_size;
+    memcpy(if_.esp, file_name_, fn_size);
+    if_.esp -= (((unsigned)if_.esp) % 4 + argc * sizeof(char * ));
+    memcpy(if_.esp, argv, argc * sizeof(char * ));
+    void * temp = if_.esp;
+    if_.esp -= sizeof(char **); // 4
+    *(char ***)if_.esp = temp;
+    if_.esp -= sizeof(int); // 4
+    *(int *)if_.esp = argc - 1;
+    if_.esp -= sizeof(void *); // 4
 
   /* If load failed, quit. */
   palloc_free_page (file_name);
-  if (!success)
-    thread_exit ();
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -89,10 +162,34 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED)
+process_wait (tid_t child_tid)
 {
-  sema_down (&temporary);
-  return 0;
+  struct child_process * child = get_process(child_tid);
+  if(child == NULL)
+    return -1;
+  sema_down (&child->sema);
+  int ret = child->status;
+  free_thread(child);
+  return ret;
+}
+
+/* Close all open files */
+void
+close_files_and_free_children(struct thread *t)
+{
+  struct list_elem *e;
+  while (!list_empty (&t->cp_list))
+    {
+      e = list_pop_front (&t->cp_list);
+      free (list_entry (e, struct child_process, cp_list_elem));
+    }
+  while (!list_empty (&t->file_list))
+    {
+      e = list_pop_front (&t->file_list);
+      struct file_ *file_ = list_entry (e, struct file_, _file_elem);
+      file_close (file_->file);
+      free (file_);
+    }
 }
 
 /* Free the current process's resources. */
@@ -101,6 +198,8 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+  file_close(cur->self->to_deny);
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -118,7 +217,11 @@ process_exit (void)
       pagedir_activate (NULL);
       pagedir_destroy (pd);
     }
-  sema_up (&temporary);
+
+    close_files_and_free_children(cur);
+
+    printf("%s: exit(%d)\n", cur->name, cur->self->status);
+    sema_up (&cur->self->sema);
 }
 
 /* Sets up the CPU for running user code in the current
@@ -234,6 +337,9 @@ load (const char *file_name, void (**eip) (void), void **esp)
       goto done;
     }
 
+    t->self->to_deny = file;
+    file_deny_write(file);
+
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
       || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
@@ -317,7 +423,6 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
  done:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
   return success;
 }
 
